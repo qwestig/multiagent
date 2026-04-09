@@ -1,0 +1,7 @@
+run_id,case_id,case_title,bucket,mode,baseline_score,final_score,delta,iterations,tokens,latency_ms
+856fcc4974894c43baf7687ba6a9f425,ml-01,Арифметическое выражение,math_logic,benchmark,0.8,1.0,0.2,2,1670,0
+47307644988b4107a8b3544badbbf01c,ml-02,Среднее и прибавка,math_logic,benchmark,0.8,1.0,0.2,2,1670,0
+db70098654d3411f80be2d33e4ecb150,ml-03,Средняя скорость,math_logic,benchmark,0.8,1.0,0.2,2,1701,0
+7d31420265b44e9abcfa6a159b55e587,ml-04,Скидка на товар,math_logic,benchmark,0.8,1.0,0.2,2,1706,0
+f51d2ca1a0d143708dd335e6f546e587,ml-05,Доля сиропа,math_logic,benchmark,0.8,1.0,0.2,2,1707,0
+5275911b0bbf4595856d3eb4f4f79f5c,ml-06,Перевод часов в минуты,math_logic,benchmark,0.8,1.0,0.2,2,1676,0

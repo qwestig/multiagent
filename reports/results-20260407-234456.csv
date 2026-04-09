@@ -1,0 +1,4 @@
+run_id,case_id,case_title,bucket,mode,baseline_score,final_score,delta,iterations,tokens,latency_ms
+9bbe1ae3b2264f1fbdcd154ea26fe8bf,ml-01,Арифметическое выражение,math_logic,benchmark,0.8,1.0,0.2,2,944,0
+87578998b8e64cd7823ce645017f90b0,ml-02,Среднее и прибавка,math_logic,benchmark,0.8,1.0,0.2,2,943,0
+0f1382476efd44dbb7608f2efde75cab,ml-03,Средняя скорость,math_logic,benchmark,0.8,1.0,0.2,2,973,0
