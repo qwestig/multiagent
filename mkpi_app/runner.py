@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from .evaluation import Evaluator
+from .benchmark_protocol import is_proxy_meco_eligible, select_proxy_meco_subset
 from .models import ModelAdapter
 from .prompts import (
     build_baseline_prompt,
@@ -12,7 +13,10 @@ from .prompts import (
     build_draft_prompt,
     build_protocol_prompt,
     build_revision_prompt,
+    build_self_eval_prompt,
+    build_step_judge_prompt,
 )
+from .proxy_meco import aggregate_proxy_samples, build_proxy_meco_trace, extract_reasoning_steps, parse_step_confidences, parse_step_judgments
 from .reporting import render_markdown_report
 from .schemas import (
     CritiqueResult,
@@ -20,6 +24,7 @@ from .schemas import (
     ExperimentRun,
     IterationRecord,
     ModelRequest,
+    ProxyMecoTrace,
     RunnerConfig,
     ScoreBreakdown,
 )
@@ -69,6 +74,7 @@ class TechniqueRunner:
         )
         baseline_answer = self._call_model("baseline", case, config).text
         baseline_score = self.evaluator.score(case, baseline_answer)
+        baseline_proxy_meco = self._build_proxy_meco(case, config, baseline_answer)
 
         draft_response = self._call_model(
             "draft",
@@ -167,10 +173,13 @@ class TechniqueRunner:
             bucket=case.bucket,
             mode=config.mode,
             created_at=created_at,
+            proxy_meco_eligible=is_proxy_meco_eligible(case),
             baseline_answer=baseline_answer,
             baseline_score=baseline_score,
+            baseline_proxy_meco=baseline_proxy_meco,
             final_answer=current_answer,
             final_score=current_score,
+            final_proxy_meco=self._build_proxy_meco(case, config, current_answer),
             iterations=iterations,
             config=config.to_dict(),
             artifacts={},
@@ -181,12 +190,58 @@ class TechniqueRunner:
         return run
 
     def run_batch(self, cases: list[DatasetCase], config: RunnerConfig) -> tuple[list[ExperimentRun], dict[str, str]]:
-        batch_config = replace(config, mode="benchmark", persist_anti_errors=False)
+        batch_config = replace(config, mode="benchmark", persist_anti_errors=False, enable_proxy_meco=True)
+        if batch_config.proxy_meco_subset_only:
+            cases = select_proxy_meco_subset(cases, per_bucket=batch_config.proxy_meco_cases_per_bucket)
         runs = [self.run(case, batch_config) for case in cases]
         report_path = self.storage.save_report(render_markdown_report(runs))
         csv_path = self.storage.export_results_csv(runs)
         artifacts = {"report_md": str(report_path), "results_csv": str(csv_path)}
         return runs, artifacts
+
+    def _build_proxy_meco(self, case: DatasetCase, config: RunnerConfig, answer: str) -> ProxyMecoTrace:
+        if not config.enable_proxy_meco:
+            return ProxyMecoTrace()
+
+        steps = extract_reasoning_steps(answer)
+        if not steps:
+            return ProxyMecoTrace()
+
+        repeats = max(1, config.proxy_meco_repeats)
+        confidence_samples: list[list[tuple[float, str]]] = []
+        llm_judgment_samples: list[list[tuple[float, bool, str]]] = []
+        for _ in range(repeats):
+            self_eval_response = self._call_model(
+                "self_eval",
+                case,
+                config,
+                answer=answer,
+                anti_errors=steps,
+            )
+            confidence_samples.append(parse_step_confidences(self_eval_response.text, len(steps)))
+            step_judge_response = self._call_model(
+                "step_judge",
+                case,
+                config,
+                answer=answer,
+                anti_errors=steps,
+            )
+            llm_judgment_samples.append(parse_step_judgments(step_judge_response.text, len(steps)))
+
+        confidence_pairs, llm_judgments, confidence_std_mean, llm_judge_consistency, sample_count = aggregate_proxy_samples(
+            confidence_samples,
+            llm_judgment_samples,
+        )
+        return build_proxy_meco_trace(
+            case,
+            answer,
+            confidence_pairs,
+            llm_judgments,
+            self.evaluator,
+            sample_count=sample_count,
+            confidence_std_mean=confidence_std_mean,
+            llm_judge_consistency=llm_judge_consistency,
+        )
 
     def _remember_rule(self, case: DatasetCase, config: RunnerConfig, rule: str) -> None:
         if config.mode == "interactive" and config.persist_anti_errors:
@@ -209,6 +264,12 @@ class TechniqueRunner:
             system_prompt, user_prompt = build_critique_prompt(case, answer or "")
         elif phase == "revision":
             system_prompt, user_prompt = build_revision_prompt(case, answer or "", critique or CritiqueResult(summary=""))
+        elif phase == "self_eval":
+            steps = [str(item) for item in (anti_errors or []) if str(item).strip()]
+            system_prompt, user_prompt = build_self_eval_prompt(case, answer or "", steps)
+        elif phase == "step_judge":
+            steps = [str(item) for item in (anti_errors or []) if str(item).strip()]
+            system_prompt, user_prompt = build_step_judge_prompt(case, answer or "", steps)
         else:
             system_prompt, user_prompt = build_protocol_prompt(case, answer or "", critique or CritiqueResult(summary=""))
 
@@ -221,6 +282,7 @@ class TechniqueRunner:
                 "phase": phase,
                 "case": case.to_dict(),
                 "answer": answer,
+                "steps": list(anti_errors or []),
                 "critique": critique.to_dict() if critique else None,
                 "anti_errors": anti_errors or [],
             },

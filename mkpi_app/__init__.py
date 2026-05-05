@@ -1,5 +1,5 @@
 from .evaluation import Evaluator
-from .models import DemoModelAdapter, OpenAICompatibleAdapter
+from .models import DemoModelAdapter, OpenAICompatibleAdapter, YandexAIStudioAdapter
 from .reporting import aggregate_runs, render_markdown_report
 from .runner import StopPolicy, TechniqueRunner
 from .schemas import (
@@ -9,6 +9,8 @@ from .schemas import (
     IterationRecord,
     ModelRequest,
     ModelResponse,
+    ProxyMecoStep,
+    ProxyMecoTrace,
     RunnerConfig,
     ScoreBreakdown,
     ScoreComponent,
@@ -28,12 +30,15 @@ __all__ = [
     "ModelResponse",
     "OpenAICompatibleAdapter",
     "ProjectStorage",
+    "ProxyMecoStep",
+    "ProxyMecoTrace",
     "RunnerConfig",
     "ScoreBreakdown",
     "ScoreComponent",
     "StopPolicy",
     "StoragePaths",
     "TechniqueRunner",
+    "YandexAIStudioAdapter",
     "UsageStats",
     "aggregate_runs",
     "render_markdown_report",

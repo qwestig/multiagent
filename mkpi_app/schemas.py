@@ -114,6 +114,46 @@ class IterationRecord:
 
 
 @dataclass(slots=True)
+class ProxyMecoStep:
+    step_index: int
+    text: str
+    confidence: float
+    rationale: str
+    cumulative_score: float
+    marginal_gain: float
+    is_supported: bool
+    judge_score: float = 0.0
+    judge_rationale: str = ""
+    llm_judge_score: float = 0.0
+    llm_judge_supported: bool = False
+    llm_judge_rationale: str = ""
+
+
+@dataclass(slots=True)
+class ProxyMecoTrace:
+    sample_count: int = 1
+    step_count: int = 0
+    supported_steps: int = 0
+    confidence_mean: float = 0.0
+    auroc: float = 0.0
+    average_precision: float = 0.0
+    brier_score: float = 0.0
+    expected_calibration_error: float = 0.0
+    precision: float = 0.0
+    recall: float = 0.0
+    f1: float = 0.0
+    overconfidence_rate: float = 0.0
+    llm_judge_agreement: float = 0.0
+    confidence_std_mean: float = 0.0
+    llm_judge_consistency: float = 0.0
+    dual_supported_steps: int = 0
+    steps: list[ProxyMecoStep] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
 class RunnerConfig:
     model_name: str = "demo-meta-correction"
     max_iterations: int = 3
@@ -123,6 +163,10 @@ class RunnerConfig:
     mode: Literal["interactive", "benchmark"] = "interactive"
     persist_runs: bool = True
     persist_anti_errors: bool = True
+    enable_proxy_meco: bool = False
+    proxy_meco_subset_only: bool = False
+    proxy_meco_cases_per_bucket: int = 4
+    proxy_meco_repeats: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -140,6 +184,9 @@ class ExperimentRun:
     baseline_score: ScoreBreakdown
     final_answer: str
     final_score: ScoreBreakdown
+    proxy_meco_eligible: bool = False
+    baseline_proxy_meco: ProxyMecoTrace = field(default_factory=ProxyMecoTrace)
+    final_proxy_meco: ProxyMecoTrace = field(default_factory=ProxyMecoTrace)
     iterations: list[IterationRecord] = field(default_factory=list)
     config: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -157,6 +204,7 @@ class ExperimentRun:
             bucket=payload["bucket"],
             mode=payload["mode"],
             created_at=payload["created_at"],
+            proxy_meco_eligible=payload.get("proxy_meco_eligible", False),
             baseline_answer=payload["baseline_answer"],
             baseline_score=ScoreBreakdown(
                 overall=payload["baseline_score"]["overall"],
@@ -168,6 +216,28 @@ class ExperimentRun:
                 total_checks=payload["baseline_score"].get("total_checks", 0),
                 notes=list(payload["baseline_score"].get("notes", [])),
             ),
+            baseline_proxy_meco=ProxyMecoTrace(
+                sample_count=payload.get("baseline_proxy_meco", {}).get("sample_count", 1),
+                step_count=payload.get("baseline_proxy_meco", {}).get("step_count", 0),
+                supported_steps=payload.get("baseline_proxy_meco", {}).get("supported_steps", 0),
+                confidence_mean=payload.get("baseline_proxy_meco", {}).get("confidence_mean", 0.0),
+                auroc=payload.get("baseline_proxy_meco", {}).get("auroc", 0.0),
+                average_precision=payload.get("baseline_proxy_meco", {}).get("average_precision", 0.0),
+                brier_score=payload.get("baseline_proxy_meco", {}).get("brier_score", 0.0),
+                expected_calibration_error=payload.get("baseline_proxy_meco", {}).get("expected_calibration_error", 0.0),
+                precision=payload.get("baseline_proxy_meco", {}).get("precision", 0.0),
+                recall=payload.get("baseline_proxy_meco", {}).get("recall", 0.0),
+                f1=payload.get("baseline_proxy_meco", {}).get("f1", 0.0),
+                overconfidence_rate=payload.get("baseline_proxy_meco", {}).get("overconfidence_rate", 0.0),
+                llm_judge_agreement=payload.get("baseline_proxy_meco", {}).get("llm_judge_agreement", 0.0),
+                confidence_std_mean=payload.get("baseline_proxy_meco", {}).get("confidence_std_mean", 0.0),
+                llm_judge_consistency=payload.get("baseline_proxy_meco", {}).get("llm_judge_consistency", 0.0),
+                dual_supported_steps=payload.get("baseline_proxy_meco", {}).get("dual_supported_steps", 0),
+                steps=[
+                    ProxyMecoStep(**step)
+                    for step in payload.get("baseline_proxy_meco", {}).get("steps", [])
+                ],
+            ),
             final_answer=payload["final_answer"],
             final_score=ScoreBreakdown(
                 overall=payload["final_score"]["overall"],
@@ -178,6 +248,28 @@ class ExperimentRun:
                 passed_checks=payload["final_score"].get("passed_checks", 0),
                 total_checks=payload["final_score"].get("total_checks", 0),
                 notes=list(payload["final_score"].get("notes", [])),
+            ),
+            final_proxy_meco=ProxyMecoTrace(
+                sample_count=payload.get("final_proxy_meco", {}).get("sample_count", 1),
+                step_count=payload.get("final_proxy_meco", {}).get("step_count", 0),
+                supported_steps=payload.get("final_proxy_meco", {}).get("supported_steps", 0),
+                confidence_mean=payload.get("final_proxy_meco", {}).get("confidence_mean", 0.0),
+                auroc=payload.get("final_proxy_meco", {}).get("auroc", 0.0),
+                average_precision=payload.get("final_proxy_meco", {}).get("average_precision", 0.0),
+                brier_score=payload.get("final_proxy_meco", {}).get("brier_score", 0.0),
+                expected_calibration_error=payload.get("final_proxy_meco", {}).get("expected_calibration_error", 0.0),
+                precision=payload.get("final_proxy_meco", {}).get("precision", 0.0),
+                recall=payload.get("final_proxy_meco", {}).get("recall", 0.0),
+                f1=payload.get("final_proxy_meco", {}).get("f1", 0.0),
+                overconfidence_rate=payload.get("final_proxy_meco", {}).get("overconfidence_rate", 0.0),
+                llm_judge_agreement=payload.get("final_proxy_meco", {}).get("llm_judge_agreement", 0.0),
+                confidence_std_mean=payload.get("final_proxy_meco", {}).get("confidence_std_mean", 0.0),
+                llm_judge_consistency=payload.get("final_proxy_meco", {}).get("llm_judge_consistency", 0.0),
+                dual_supported_steps=payload.get("final_proxy_meco", {}).get("dual_supported_steps", 0),
+                steps=[
+                    ProxyMecoStep(**step)
+                    for step in payload.get("final_proxy_meco", {}).get("steps", [])
+                ],
             ),
             iterations=[
                 IterationRecord(

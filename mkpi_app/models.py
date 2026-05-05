@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import http.client
 import os
 import re
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -10,15 +12,11 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from .schemas import CritiqueResult, DatasetCase, ModelRequest, ModelResponse, UsageStats
-from .utils import (
-    has_close_numeric_value,
-    keyword_coverage,
-    marker_group_coverage,
-    normalize_text,
-)
+from .utils import has_close_numeric_value, keyword_coverage, marker_group_coverage, normalize_text
 
 OPENAI_BASE_URL = "https://api.openai.com/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+YANDEX_BASE_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1"
 
 
 class ModelAdapter(ABC):
@@ -133,6 +131,95 @@ class OpenAICompatibleAdapter(ModelAdapter):
         return headers
 
 
+class YandexAIStudioAdapter(ModelAdapter):
+    def __init__(
+        self,
+        model: str = "yandexgpt-lite",
+        api_key: str | None = None,
+        folder_id: str | None = None,
+        provider_name: str = "yandex-ai-studio",
+    ) -> None:
+        self.model = model
+        self.api_key = api_key or os.getenv("MKPI_API_KEY")
+        self.folder_id = folder_id or os.getenv("MKPI_YANDEX_FOLDER_ID") or ""
+        self.provider_name = provider_name
+        self.max_retries = 3
+        self.verbose = os.getenv("MKPI_YANDEX_VERBOSE", "").lower() in {"1", "true", "yes"}
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        if not self.api_key:
+            raise RuntimeError("Не найден API key для Yandex AI Studio.")
+        if not self.folder_id:
+            raise RuntimeError("Не найден folder ID для Yandex AI Studio. Передайте его явно или через MKPI_YANDEX_FOLDER_ID.")
+
+        payload = {
+            "modelUri": f"gpt://{self.folder_id}/{self.model}/latest",
+            "completionOptions": {
+                "stream": False,
+                "temperature": request.temperature,
+                "maxTokens": str(request.max_tokens),
+            },
+            "messages": [
+                {"role": "system", "text": request.system_prompt},
+                {"role": "user", "text": request.user_prompt},
+            ],
+        }
+        encoded = json.dumps(payload).encode("utf-8")
+        http_request = urllib.request.Request(
+            url=f"{YANDEX_BASE_URL}/completion",
+            headers={
+                "Authorization": f"Api-Key {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            data=encoded,
+            method="POST",
+        )
+        started = time.perf_counter()
+        last_error: Exception | None = None
+        raw_payload: dict[str, Any] | None = None
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(http_request, timeout=120) as response:
+                    raw_payload = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                details = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"Ошибка Yandex API {exc.code}: {details}") from exc
+            except (urllib.error.URLError, http.client.RemoteDisconnected) as exc:
+                last_error = exc
+                if self.verbose:
+                    print(
+                        f"[yandex-api] retry {attempt}/{self.max_retries} after error: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                if attempt >= self.max_retries:
+                    break
+                time.sleep(1.5 * attempt)
+
+        if raw_payload is None:
+            raise RuntimeError(f"Не удалось подключиться к Yandex API после {self.max_retries} попыток: {last_error}")
+
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        alternatives = raw_payload.get("result", {}).get("alternatives", [])
+        if not alternatives:
+            raise RuntimeError(f"Yandex API вернул пустой список alternatives: {raw_payload}")
+        text = str(alternatives[0].get("message", {}).get("text", "")).strip()
+        usage = raw_payload.get("result", {}).get("usage", {})
+        return ModelResponse(
+            text=text,
+            provider=self.provider_name,
+            model=self.model,
+            usage=UsageStats(
+                prompt_tokens=int(usage.get("inputTextTokens", 0)),
+                completion_tokens=int(usage.get("completionTokens", 0)),
+                total_tokens=int(usage.get("totalTokens", 0)),
+            ),
+            latency_ms=latency_ms,
+            raw=raw_payload,
+        )
+
+
 class DemoModelAdapter(ModelAdapter):
     def __init__(self, model: str = "demo-meta-correction") -> None:
         self.model = model
@@ -155,6 +242,10 @@ class DemoModelAdapter(ModelAdapter):
         elif phase == "protocol":
             critique = CritiqueResult(**metadata["critique"])
             text = self._protocol(case, critique)
+        elif phase == "self_eval":
+            text = self._self_eval(case, metadata.get("steps", []), metadata.get("answer", ""))
+        elif phase == "step_judge":
+            text = self._step_judge(case, metadata.get("steps", []), metadata.get("answer", ""))
         else:
             text = case.reference
 
@@ -359,3 +450,62 @@ class DemoModelAdapter(ModelAdapter):
         if case.bucket == "analysis":
             return "Если пишешь аналитический вывод, то сверяй наличие всех опорных понятий и обязательно проверяй альтернативное объяснение; если данных мало, явно обозначай неопределённость."
         return "Если составляешь план с ограничениями, то перед финализацией проходи чеклист всех обязательных и запрещённых условий; если покрытие ограничений не доказано, не делай категоричный вывод."
+
+    def _self_eval(self, case: DatasetCase, steps: list[str], answer: str) -> str:
+        critique = self._critique(case, answer)
+        payload_steps = []
+        for index, step in enumerate(steps, start=1):
+            confidence = 0.82
+            rationale = "Шаг выглядит устойчивым относительно условий задачи."
+            normalized_step = normalize_text(step)
+            if critique.issues and index == len(steps):
+                confidence = 0.36
+                rationale = "Финальный шаг уязвим: критик нашёл проблемы, влияющие на вывод."
+            elif case.bucket == "analysis" and "вывод" not in normalized_step and index == len(steps):
+                confidence = 0.48
+                rationale = "Итоговый вывод сформулирован неполно или без явной калибровки."
+            elif case.bucket == "math_logic" and not any(char.isdigit() for char in step):
+                confidence = 0.58
+                rationale = "В шаге мало проверяемых числовых опор, поэтому уверенность умеренная."
+            payload_steps.append(
+                {
+                    "step_index": index,
+                    "confidence": confidence,
+                    "rationale": rationale,
+                }
+            )
+        return json.dumps({"steps": payload_steps}, ensure_ascii=False, indent=2)
+
+    def _step_judge(self, case: DatasetCase, steps: list[str], answer: str) -> str:
+        critique = self._critique(case, answer)
+        payload_steps = []
+        for index, step in enumerate(steps, start=1):
+            score = 0.78
+            supported = True
+            rationale = "Шаг в целом согласован с условиями задачи."
+            normalized_step = normalize_text(step)
+            if critique.issues and index == len(steps):
+                score = 0.24
+                supported = False
+                rationale = "Финальный шаг не поддержан: критик нашёл проблемы, влияющие на итоговый вывод."
+            elif case.bucket == "math_logic" and not any(char.isdigit() for char in step):
+                score = 0.45
+                supported = False
+                rationale = "Шаг не даёт проверяемой числовой опоры для вычислительной задачи."
+            elif case.bucket == "analysis" and not any(marker in normalized_step for marker in ["риск", "неопредел", "вывод", "провер"]):
+                score = 0.42
+                supported = False
+                rationale = "Шаг слишком общий и не фиксирует риск, неопределённость или проверяемый вывод."
+            elif case.bucket == "constraint_planning" and not any(marker in normalized_step for marker in ["провер", "контроль", "ответствен", "откат", "риск"]):
+                score = 0.46
+                supported = False
+                rationale = "Шаг слабо выражает управляемую процедуру или контроль исполнения."
+            payload_steps.append(
+                {
+                    "step_index": index,
+                    "score": score,
+                    "supported": supported,
+                    "rationale": rationale,
+                }
+            )
+        return json.dumps({"steps": payload_steps}, ensure_ascii=False, indent=2)
